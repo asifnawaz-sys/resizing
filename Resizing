@@ -1,0 +1,76 @@
+import os
+import io
+from PIL import Image
+from moviepy.editor import VideoFileClip
+import ipywidgets as widgets
+from IPython.display import display
+import warnings
+
+# Faltu warnings ko hide karne ke liye
+warnings.filterwarnings("ignore")
+
+output_folder = '/kaggle/working/resizer_output'
+if not os.path.exists(output_folder):
+    os.makedirs(output_folder)
+
+uploader = widgets.FileUpload(accept='', multiple=True)
+
+print("1. 'Upload' button par click karke media select karein.")
+display(uploader)
+
+def process_media(b):
+    if not uploader.value:
+        print("Pehle files upload to kar lain!")
+        return
+        
+    print(f"Processing {len(uploader.value)} files... please wait.")
+    
+    for filename, file_info in uploader.value.items():
+        # Kaggle widget data handling
+        content = file_info['content']
+        temp_input = os.path.join('/kaggle/working', filename)
+        
+        with open(temp_input, 'wb') as f:
+            f.write(content)
+            
+        # --- IMAGES ---
+        if filename.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+            try:
+                img = Image.open(temp_input)
+                img = img.convert("RGB")
+                img = img.resize((1200, 1200), Image.LANCZOS)
+                save_path = os.path.join(output_folder, f"{os.path.splitext(filename)[0]}.webp")
+                img.save(save_path, "WEBP", quality=80, optimize=True)
+                print(f"✅ Image Done: {filename}")
+            except Exception as e:
+                print(f"❌ Error Image {filename}: {e}")
+
+        # --- VIDEOS ---
+        elif filename.lower().endswith(('.mp4', '.mov', '.avi')):
+            try:
+                # audio=False hatane se error aa sakta hai agar cloud pe sound card na ho
+                # isliye hum logger=None use kar rahe hain
+                clip = VideoFileClip(temp_input, audio=True) 
+                
+                # Resize maintain aspect ratio
+                final_clip = clip.resize(height=1200) if clip.w > clip.h else clip.resize(width=1200)
+                final_clip = final_clip.resize(newsize=(1200, 1200))
+                
+                save_path = os.path.join(output_folder, f"{os.path.splitext(filename)[0]}.mp4")
+                
+                # Preset='ultrafast' processing speed badha dega
+                final_clip.write_videofile(save_path, codec="libx264", audio_codec="aac", fps=24, bitrate="1500k", logger=None)
+                
+                print(f"✅ Video Done: {filename}")
+                clip.close()
+            except Exception as e:
+                print(f"❌ Error Video {filename}: {e}")
+        
+        if os.path.exists(temp_input):
+            os.remove(temp_input)
+
+    print("\n--- Processing Mukammal! ---")
+
+run_button = widgets.Button(description="Start Resizing", button_style='success')
+run_button.on_click(process_media)
+display(run_button)

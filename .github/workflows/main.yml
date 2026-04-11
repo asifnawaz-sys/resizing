@@ -17,12 +17,19 @@ jobs:
         run: |
           pip install pyinstaller pillow pandas
 
-      - name: Build with PyInstaller
+      - name: Build Mac App Bundle
         run: |
-          python3 -m PyInstaller --noconsole --onefile --name "UltraResizer_v1.4_Mac" resizer_final.py
+          # --windowed se Mac ka asli folder (.app) bany ga
+          python3 -m PyInstaller --windowed --onefile --name "UltraResizer_Pro" resizer_final.py
+
+      - name: Create Flashable Zip
+        run: |
+          # App ko zip karna lazmi hai taaky Windows usay kharab na kary
+          cd dist
+          zip -r UltraResizer_MacOS_Final.zip UltraResizer_Pro.app
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: artifacts/upload-artifact@v4
         with:
-          name: MacOS_App
-          path: dist/UltraResizer_v1.4_Mac
+          name: MacOS_Final_Package
+          path: dist/UltraResizer_MacOS_Final.zip

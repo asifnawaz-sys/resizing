@@ -1,0 +1,28 @@
+name: Build Mac App
+on: [push]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/checkout@v3
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install customtkinter Pillow py2app
+
+      - name: Build with py2app
+        run: |
+          python3 setup.py py2app
+
+      - name: Upload App
+        uses: actions/upload-artifact@v3
+        with:
+          name: Siar-Resizer-Mac
+          path: dist/Siar_Digital_Resizer.app

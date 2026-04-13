@@ -1,28 +1,171 @@
-name: Build Mac App
-on: [push]
+"""
+╔══════════════════════════════════════════════════════╗
+║     Image Resizer by Siar Digital (TURBO v5.7)       ║
+║     Created by Asif Nawaz                            ║
+║     Features: Screen-Fit UI + Colored Footer         ║
+╚══════════════════════════════════════════════════════╝
+"""
 
-jobs:
-  build:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+import os, threading, queue, io, concurrent.futures, gc, subprocess, sys
 
-      - name: Set up Python
-        uses: actions/checkout@v3
-        with:
-          python-version: '3.11'
+def install_and_import(package, import_name=None):
+    if import_name is None: import_name = package
+    try: __import__(import_name)
+    except ImportError: subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
-      - name: Install dependencies
-        run: |
-          pip install customtkinter Pillow py2app
+install_and_import("customtkinter", "customtkinter")
+install_and_import("Pillow", "PIL")
+import customtkinter as ctk
+from PIL import Image, ImageOps, ImageFilter
+from tkinter import filedialog, messagebox
 
-      - name: Build with py2app
-        run: |
-          python3 setup.py py2app
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("green")
 
-      - name: Upload App
-        uses: actions/upload-artifact@v3
-        with:
-          name: Siar-Resizer-Mac
-          path: dist/Siar_Digital_Resizer.app
+# UI Colors
+GREEN, GREEN_DARK, BG_DARK = "#1DB954", "#0F6E56", "#0D1117"
+BG_CARD, BG_INPUT, BORDER = "#161B22", "#1C2333", "#30363D"
+TEXT_MAIN, TEXT_MUTED = "#F0F6FC", "#8B949E"
+BLUE_ASIF, ORANGE_SIAR = "#38bdf8", "#f97316"
+
+# --- Image Processing Core ---
+def make_tiled_bg(img, tw, th, ts=500):
+    cx, cy = max(0, (img.width-ts)//2), max(0, (img.height-ts)//2)
+    s = img.crop((cx, cy, min(img.width, cx+ts), min(img.height, cy+ts)))
+    if s.width < 10: return Image.new("RGB", (tw, th), (30, 30, 30))
+    tile = Image.new("RGB", (s.width*2, s.height*2))
+    tile.paste(s, (0, 0)); tile.paste(ImageOps.mirror(s), (s.width, 0))
+    tile.paste(ImageOps.flip(s), (0, s.height)); tile.paste(ImageOps.mirror(ImageOps.flip(s)), (s.width, s.height))
+    tile = tile.filter(ImageFilter.GaussianBlur(radius=2))
+    bg = Image.new("RGB", (tw, th))
+    for x in range(0, tw, tile.width):
+        for y in range(0, th, tile.height): bg.paste(tile, (x, y))
+    return bg
+
+def smart_save(img, path, fmt, mb):
+    f = fmt.upper()
+    if f in ("PNG", "TIFF"): img.save(path, f); return True, os.path.getsize(path)
+    l, h, bq = 30, 95, 85
+    for _ in range(8):
+        m = (l+h)//2; buf = io.BytesIO(); img.save(buf, f, quality=m, optimize=True)
+        if buf.tell() <= mb: bq, l = m, m+1
+        else: h = m-1
+    img.save(path, f, quality=bq, optimize=True); return True, os.path.getsize(path)
+
+# --- Worker Logic ---
+msg_queue = queue.Queue()
+
+def process_file(fn, inp, tw, th, out, mode, fmt, mb, emap):
+    try:
+        with Image.open(os.path.join(inp, fn)) as im:
+            im = im.convert("RGB")
+            if mode == "contain":
+                bg = make_tiled_bg(im, tw, th)
+                fg = im.copy(); fg.thumbnail((tw, th), Image.Resampling.LANCZOS)
+                bg.paste(fg, ((tw - fg.width)//2, (th - fg.height)//2))
+                res = bg
+            elif mode == "cover":
+                r, tr = im.width/im.height, tw/th
+                nw, nh = (tw, round(tw/r)) if r < tr else (round(th*r), th)
+                res = im.resize((nw, nh), Image.Resampling.LANCZOS).crop(((nw-tw)//2, (nh-th)//2, (nw+tw)//2, (nh+th)//2))
+            else:
+                r, tr = im.width/im.height, tw/th
+                nw, nh = (tw, round(tw/r)) if r < tr else (round(th*r), th)
+                ri = im.resize((nw, nh), Image.Resampling.LANCZOS)
+                eb = ri.convert("L").filter(ImageFilter.FIND_EDGES).getbbox()
+                cx, cy = (eb[0]+eb[2])//2 if eb else nw//2, (eb[1]+eb[3])//2 if eb else nh//2
+                res = ri.crop((max(0, min(cx-tw//2, nw-tw)), max(0, min(cy-th//2, nh-th)), max(0, min(cx-tw//2, nw-tw))+tw, max(0, min(cy-th//2, nh-th))+th))
+        op = os.path.join(out, f"{os.path.splitext(fn)[0]}_resized.{emap.get(fmt, 'webp')}")
+        ok, sz = smart_save(res, op, fmt, mb)
+        return ("progress", fn, round(sz/1024))
+    except Exception as e: return ("error", fn, str(e))
+
+def worker(inp, tw, th, out, mode, fmt, mb):
+    files = [f for f in os.listdir(inp) if f.lower().endswith(('.jpg','.jpeg','.png','.webp'))]
+    if not files: msg_queue.put(("done", 0)); return
+    emap, total, done = {"webp":"webp","jpeg":"jpg","png":"png"}, len(files), 0
+    with concurrent.futures.ThreadPoolExecutor() as ex:
+        futures = {ex.submit(process_file, f, inp, tw, th, out, mode, fmt, mb, emap): f for f in files}
+        for fut in concurrent.futures.as_completed(futures):
+            done += 1
+            msg_queue.put(("progress", done, total))
+            if done % 10 == 0: gc.collect()
+    msg_queue.put(("done", total))
+
+# --- GUI ---
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Siar Digital Resizer")
+        self.geometry("580x820")
+        self.resizable(False, False)
+        self.configure(fg_color=BG_DARK)
+        self.main = ctk.CTkFrame(self, fg_color=BG_DARK)
+        self.main.pack(fill="both", expand=True, padx=10, pady=5)
+        self._build_ui()
+        self.poll_queue()
+
+    def _build_ui(self):
+        h = ctk.CTkFrame(self.main, fg_color=BG_CARD, corner_radius=12, border_color=BORDER, border_width=1)
+        h.pack(fill="x", pady=(5, 10))
+        ctk.CTkLabel(h, text="Image Resizer by Siar Digital", font=("Segoe UI", 20, "bold"), text_color=TEXT_MAIN).pack(pady=(10, 0))
+        ctk.CTkLabel(h, text="Turbo Engine · Zero Distortion", font=("Segoe UI", 11), text_color=TEXT_MUTED).pack(pady=(0, 10))
+
+        self.folder_var = ctk.StringVar()
+        f_fold = ctk.CTkFrame(self.main, fg_color="transparent")
+        f_fold.pack(fill="x", pady=5)
+        ctk.CTkEntry(f_fold, textvariable=self.folder_var, placeholder_text="Path...", height=38, fg_color=BG_INPUT).pack(side="left", fill="x", expand=True, padx=(0,5))
+        ctk.CTkButton(f_fold, text="Browse", fg_color=GREEN, width=80, command=lambda: self.folder_var.set(filedialog.askdirectory())).pack(side="left")
+
+        self.w_var, self.h_var = ctk.StringVar(value="850"), ctk.StringVar(value="1280")
+        f_dim = ctk.CTkFrame(self.main, fg_color="transparent")
+        f_dim.pack(fill="x", pady=5)
+        ctk.CTkEntry(f_dim, textvariable=self.w_var, width=100, height=38, justify="center").pack(side="left")
+        ctk.CTkLabel(f_dim, text=" × ", font=("Segoe UI", 18), text_color=TEXT_MUTED).pack(side="left", padx=5)
+        ctk.CTkEntry(f_dim, textvariable=self.h_var, width=100, height=38, justify="center").pack(side="left")
+
+        self.fit_var = ctk.StringVar(value="contain")
+        for v, t in [("contain", "No Squeeze (Mirror BG)"), ("cover", "Fill & Crop"), ("smartcrop", "Smart AI Crop")]:
+            ctk.CTkRadioButton(self.main, text=t, variable=self.fit_var, value=v, fg_color=GREEN).pack(anchor="w", padx=10, pady=2)
+
+        self.fmt_var = ctk.StringVar(value="webp")
+        f_fmt = ctk.CTkFrame(self.main, fg_color="transparent")
+        f_fmt.pack(fill="x", pady=5)
+        for f in ["webp", "jpeg", "png"]:
+            ctk.CTkRadioButton(f_fmt, text=f.upper(), variable=self.fmt_var, value=f, fg_color=GREEN, width=80).pack(side="left")
+        
+        self.size_sl = ctk.CTkSlider(self.main, from_=200, to=1500, progress_color=GREEN, button_color=GREEN)
+        self.size_sl.set(1500); self.size_sl.pack(fill="x", pady=10)
+
+        self.pb = ctk.CTkProgressBar(self.main, height=8, progress_color=GREEN); self.pb.set(0); self.pb.pack(fill="x", pady=5)
+        self.st_var = ctk.StringVar(value="Ready")
+        ctk.CTkLabel(self.main, textvariable=self.st_var, font=("Segoe UI", 10), text_color=TEXT_MUTED).pack()
+
+        self.start_btn = ctk.CTkButton(self.main, text="▶ START TURBO PROCESSING", font=("Segoe UI", 15, "bold"), fg_color=GREEN, height=48, command=self.start)
+        self.start_btn.pack(fill="x", pady=5)
+
+        ft = ctk.CTkFrame(self.main, fg_color="transparent")
+        ft.pack(pady=15)
+        ctk.CTkLabel(ft, text="Created by", font=("Segoe UI", 10), text_color="#484F58").pack(side="left", padx=3)
+        ctk.CTkLabel(ft, text="Asif Nawaz", font=("Segoe UI", 15, "bold"), text_color=BLUE_ASIF).pack(side="left")
+        ctk.CTkLabel(ft, text="|", font=("Segoe UI", 12), text_color="#484F58").pack(side="left", padx=5)
+        ctk.CTkLabel(ft, text="Siar Digital", font=("Segoe UI", 15, "bold"), text_color=ORANGE_SIAR).pack(side="left")
+        ctk.CTkLabel(ft, text="© 2026", font=("Segoe UI", 10), text_color="#484F58").pack(side="left", padx=3)
+
+    def start(self):
+        f = self.folder_var.get().strip()
+        if not f or not os.path.isdir(f): return
+        self.start_btn.configure(state="disabled")
+        out = os.path.join(f, "Siar_Output"); os.makedirs(out, exist_ok=True)
+        threading.Thread(target=worker, args=(f, int(self.w_var.get()), int(self.h_var.get()), out, self.fit_var.get(), self.fmt_var.get(), int(self.size_sl.get())*1024), daemon=True).start()
+
+    def poll_queue(self):
+        try:
+            while True:
+                m = msg_queue.get_nowait()
+                if m[0] == "progress": self.pb.set(m[1]/m[2]); self.st_var.set(f"Doing: {m[1]}/{m[2]}")
+                elif m[0] == "done": self.start_btn.configure(state="normal"); messagebox.showinfo("Siar Digital", "All Done!")
+        except queue.Empty: pass
+        self.after(100, self.poll_queue)
+
+if __name__ == "__main__": App().mainloop()
